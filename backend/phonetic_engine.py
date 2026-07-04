@@ -1,87 +1,168 @@
 import re
+import unicodedata
 from fuzzywuzzy import fuzz
 
 class IndicPhoneticEngine:
     def __init__(self):
-        # Phonetic mapping for Indic languages
-        # This maps similar sounding characters to a common base
+        # Phonetic mapping for Indic names (transliterated)
+        # Maps similar sounding letters to common representative characters
         self.phonetic_map = {
             'A': 'A', 'E': 'A', 'I': 'A', 'O': 'A', 'U': 'A', 'Y': 'A',
-            'B': 'P', 'P': 'P',
+            'B': 'B', 'V': 'B', 'W': 'B',  # V, W, B are phonetically interchanged in many Indic dialects (e.g., Vijay -> Bijoy)
+            'P': 'P', 'F': 'P',            # P and F map to plosive representative
             'C': 'K', 'G': 'K', 'K': 'K', 'Q': 'K',
             'D': 'T', 'T': 'T',
-            'F': 'P', 'V': 'P',
             'L': 'L',
             'M': 'M', 'N': 'M',
             'R': 'R',
             'S': 'S', 'Z': 'S', 'X': 'S',
-            'J': 'C', 'H': '', # H is often silent or aspiration
+            'J': 'J', 'H': '',             # H represents aspiration and is skipped in base mappings, handled in indic_rules
         }
         
-        # Specific Indic mappings
+        # Indic spelling substitution rules applied before mapping
         self.indic_rules = [
             (r'CH|KSH|SH|S', 'S'),
             (r'PH|F', 'P'),
-            (r'BH|B', 'P'),
+            (r'BH|B', 'B'),
             (r'DH|D|TH|T', 'T'),
             (r'GH|G|KH|K', 'K'),
-            (r'JH|J', 'C'),
-            (r'V|W', 'P'),
+            (r'JH|J', 'J'),
             (r'Y|I|EE', 'A'),
             (r'OO|U', 'A'),
         ]
 
+        # Alias/Synonym lookup for historical/administrative names
+        self.aliases = {
+            "varanasi": {"benares", "banaras", "kashi"},
+            "benares": {"varanasi", "banaras", "kashi"},
+            "banaras": {"varanasi", "benares", "kashi"},
+            "kashi": {"varanasi", "benares", "banaras"},
+            "kolkata": {"calcutta"},
+            "calcutta": {"kolkata"},
+            "mumbai": {"bombay"},
+            "bombay": {"mumbai"},
+            "chennai": {"madras"},
+            "madras": {"chennai"},
+            "trivandrum": {"thiruvananthapuram"},
+            "thiruvananthapuram": {"trivandrum"},
+            "bengaluru": {"bangalore"},
+            "bangalore": {"bengaluru"},
+            "kochi": {"cochin"},
+            "cochin": {"kochi"},
+            "puducherry": {"pondicherry"},
+            "pondicherry": {"puducherry"}
+        }
+
     def normalize(self, text):
-        """Basic normalization: uppercase and remove non-alphabetic chars."""
-        text = text.upper()
+        """Clean string: strip diacritics, convert to uppercase, keep A-Z only."""
+        if not text:
+            return ""
+        # Remove leading/trailing space and convert to uppercase
+        text = text.strip().upper()
+        # Strip diacritics/accents
+        text = "".join(
+            c for c in unicodedata.normalize('NFD', text)
+            if unicodedata.category(c) != 'Mn'
+        )
+        # Keep only Latin alphabetic characters
         text = re.sub(r'[^A-Z]', '', text)
         return text
 
     def get_phonetic_code(self, text):
-        """Generates a phonetic code similar to Soundex but tuned for Indic names."""
-        text = self.normalize(text)
-        if not text:
+        """Generates a structured phonetic code for the given text."""
+        norm_text = self.normalize(text)
+        if not norm_text:
             return ""
 
-        # Apply Indic-specific regex rules first
+        # Apply substitution rules
+        processed = norm_text
         for pattern, replacement in self.indic_rules:
-            text = re.sub(pattern, replacement, text)
+            processed = re.sub(pattern, replacement, processed)
 
-        # Convert to phonetic base
-        code = text[0]
-        for char in text[1:]:
+        if not processed:
+            return ""
+
+        # Construct phonetic code mapping the first character as well
+        first_char = processed[0]
+        code = self.phonetic_map.get(first_char, first_char)
+        for char in processed[1:]:
             mapped = self.phonetic_map.get(char, '')
+            # Append if mapped, non-empty, and avoids contiguous duplicates
             if mapped and mapped != code[-1]:
                 code += mapped
         
-        # Limit code length
         return code[:6]
 
     def compare(self, name1, name2):
         """Compares two names and returns a similarity score (0-100)."""
+        clean1 = name1.strip().lower()
+        clean2 = name2.strip().lower()
+        
+        if not clean1 or not clean2:
+            raise ValueError("Input names cannot be empty")
+            
+        # 1. Exact Match Check
+        if clean1 == clean2:
+            return {
+                "name1": name1,
+                "name2": name2,
+                "code1": self.get_phonetic_code(name1),
+                "code2": self.get_phonetic_code(name2),
+                "score": 100.0,
+                "is_similar": True,
+                "match_type": "exact"
+            }
+
+        # 2. Alias Synonym Check
+        if clean1 in self.aliases and clean2 in self.aliases[clean1]:
+            return {
+                "name1": name1,
+                "name2": name2,
+                "code1": self.get_phonetic_code(name1),
+                "code2": self.get_phonetic_code(name2),
+                "score": 100.0,
+                "is_similar": True,
+                "match_type": "alias"
+            }
+
+        # 3. Calculate Phonetic Codes and Fuzzy String Similarity
         code1 = self.get_phonetic_code(name1)
         code2 = self.get_phonetic_code(name2)
         
-        # 1. Phonetic Code Match
-        phonetic_match = 100 if code1 == code2 else 0
+        fuzzy_score = fuzz.token_sort_ratio(clean1, clean2)
         
-        # 2. Fuzzy String Matching on original names
-        fuzzy_score = fuzz.token_sort_ratio(name1.lower(), name2.lower())
-        
-        # 3. Weighted Score
-        # Phonetic match is very important for Indian names (misspellings)
-        if code1 == code2:
-            final_score = max(80, fuzzy_score)
-        else:
-            final_score = fuzzy_score * 0.7 # Penalize if phonetic codes don't match
+        # 4. Hybrid Scoring Logic
+        if code1 and code2 and code1 == code2:
+            # Phonetic codes match. Apply a boost based on name length.
+            # Shorter names have higher likelihood of collision, so we check a threshold.
+            min_length = min(len(clean1), len(clean2))
             
+            if min_length <= 3:
+                # Require higher baseline similarity to boost short names (avoids Sun vs Sam)
+                if fuzzy_score >= 40:
+                    final_score = min(100, fuzzy_score + 15)
+                    final_score = max(final_score, 75)
+                else:
+                    final_score = fuzzy_score + 10 # Little boost, no auto-match
+            else:
+                # Longer names with phonetic matches are highly likely to be variants
+                final_score = min(100, fuzzy_score + 25)
+                if fuzzy_score >= 35:
+                    final_score = max(final_score, 78)
+        else:
+            # Phonetic mismatch. Apply a penalty to the fuzzy score.
+            final_score = fuzzy_score * 0.70
+            
+        final_score = round(final_score, 2)
+        
         return {
             "name1": name1,
             "name2": name2,
             "code1": code1,
             "code2": code2,
-            "score": round(final_score, 2),
-            "is_similar": final_score >= 75
+            "score": final_score,
+            "is_similar": final_score >= 75,
+            "match_type": "hybrid"
         }
 
 # Singleton instance

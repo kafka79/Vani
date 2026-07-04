@@ -2,6 +2,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const name1Input = document.getElementById('name1');
     const name2Input = document.getElementById('name2');
     const compareBtn = document.getElementById('compare-btn');
+    const btnText = document.getElementById('btn-text');
+    const btnSpinner = document.getElementById('btn-spinner');
+    const btnArrow = document.getElementById('btn-arrow');
     const resultSection = document.getElementById('result-section');
     const scoreValue = document.getElementById('score-value');
     const scorePath = document.getElementById('score-path');
@@ -9,20 +12,54 @@ document.addEventListener('DOMContentLoaded', () => {
     const code2 = document.getElementById('code2');
     const similarityStatus = document.getElementById('similarity-status');
     const chips = document.querySelectorAll('.chip');
+    const toastContainer = document.getElementById('toast-container');
 
-    const API_URL = 'http://localhost:8000';
+    // Dynamic API base URL: use relative paths if served on port 8000 or production, else default to localhost:8000
+    const API_URL = (window.location.port === '8000' || (window.location.port === '' && window.location.hostname !== 'localhost'))
+        ? ''
+        : 'http://localhost:8000';
+
+    // Toast Notification helper
+    function showToast(message, type = 'error') {
+        const toast = document.createElement('div');
+        toast.className = `toast toast-${type}`;
+        toast.innerHTML = `
+            <span class="toast-message">${message}</span>
+            <button class="toast-close">&times;</button>
+        `;
+        toastContainer.appendChild(toast);
+
+        // Slide/Fade in
+        setTimeout(() => toast.classList.add('show'), 10);
+
+        // Auto remove
+        const autoClose = setTimeout(() => closeToast(toast), 4000);
+
+        // Manual close
+        toast.querySelector('.toast-close').addEventListener('click', () => {
+            clearTimeout(autoClose);
+            closeToast(toast);
+        });
+    }
+
+    function closeToast(toast) {
+        toast.classList.remove('show');
+        toast.addEventListener('transitionend', () => {
+            toast.remove();
+        });
+    }
 
     async function detectSimilarity() {
         const name1 = name1Input.value.trim();
         const name2 = name2Input.value.trim();
 
         if (!name1 || !name2) {
-            alert('Please enter both names');
+            showToast('Please fill in both name/place fields.');
             return;
         }
 
-        compareBtn.disabled = true;
-        compareBtn.innerHTML = 'Analyzing...';
+        // Toggle Loading States
+        setLoading(true);
 
         try {
             const response = await fetch(`${API_URL}/compare`, {
@@ -31,36 +68,57 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify({ name1, name2 })
             });
 
-            if (!response.ok) throw new Error('API Error');
-
             const data = await response.json();
+
+            if (!response.ok) {
+                // Backend validation errors (HTTP 400)
+                throw new Error(data.detail || 'An error occurred during evaluation.');
+            }
+
             updateUI(data);
         } catch (error) {
-            console.error(error);
-            alert('Could not connect to the backend. Make sure the FastAPI server is running on port 8000.');
+            console.error('API Error:', error);
+            showToast(error.message || 'Could not connect to the backend. Make sure the FastAPI server is running.');
         } finally {
-            compareBtn.disabled = false;
-            compareBtn.innerHTML = 'Detect Similarity <span class="btn-icon">→</span>';
+            setLoading(false);
+        }
+    }
+
+    function setLoading(isLoading) {
+        compareBtn.disabled = isLoading;
+        name1Input.disabled = isLoading;
+        name2Input.disabled = isLoading;
+
+        if (isLoading) {
+            btnText.textContent = 'Analyzing...';
+            btnSpinner.classList.remove('hidden');
+            btnArrow.classList.add('hidden');
+        } else {
+            btnText.textContent = 'Detect Similarity';
+            btnSpinner.classList.add('hidden');
+            btnArrow.classList.remove('hidden');
         }
     }
 
     function updateUI(data) {
         resultSection.classList.remove('hidden');
         
-        // Animate score
+        // Reset and animate score
         let currentScore = 0;
         const targetScore = data.score;
-        const duration = 1000;
+        const duration = 800; // ms
         const startTime = performance.now();
 
         function animate(currentTime) {
             const elapsed = currentTime - startTime;
             const progress = Math.min(elapsed / duration, 1);
             
-            currentScore = Math.floor(progress * targetScore);
+            // Easing function (easeOutQuad)
+            const easeProgress = progress * (2 - progress);
+            currentScore = Math.floor(easeProgress * targetScore);
             scoreValue.textContent = currentScore;
             
-            // Update circular progress
+            // Update circular progress SVG
             const dashArray = `${currentScore}, 100`;
             scorePath.setAttribute('stroke-dasharray', dashArray);
 
@@ -70,38 +128,44 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         requestAnimationFrame(animate);
 
-        // Update codes
-        code1.textContent = data.code1;
-        code2.textContent = data.code2;
+        // Update phonetic codes or display warning if missing
+        code1.textContent = data.code1 || 'N/A';
+        code2.textContent = data.code2 || 'N/A';
 
-        // Update status badge
+        // Update status badge design based on match type and score
         if (data.score >= 90) {
-            similarityStatus.textContent = 'Highly Similar';
-            similarityStatus.style.background = 'rgba(16, 185, 129, 0.2)';
+            similarityStatus.textContent = data.match_type === 'alias' ? 'Verified Alias' : 'Highly Similar';
+            similarityStatus.style.background = 'rgba(16, 185, 129, 0.15)';
             similarityStatus.style.color = '#10b981';
-        } else if (data.score >= 70) {
+            similarityStatus.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+        } else if (data.score >= 75) {
             similarityStatus.textContent = 'Likely Match';
-            similarityStatus.style.background = 'rgba(245, 158, 11, 0.2)';
+            similarityStatus.style.background = 'rgba(245, 158, 11, 0.15)';
             similarityStatus.style.color = '#f59e0b';
+            similarityStatus.style.borderColor = 'rgba(245, 158, 11, 0.3)';
         } else {
             similarityStatus.textContent = 'Distinct Entities';
-            similarityStatus.style.background = 'rgba(239, 68, 68, 0.2)';
+            similarityStatus.style.background = 'rgba(239, 68, 68, 0.15)';
             similarityStatus.style.color = '#ef4444';
+            similarityStatus.style.borderColor = 'rgba(239, 68, 68, 0.3)';
         }
     }
 
     compareBtn.addEventListener('click', detectSimilarity);
 
-    // Enter key support
+    // Enter key submit triggers
     [name1Input, name2Input].forEach(input => {
         input.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') detectSimilarity();
+            if (e.key === 'Enter' && !compareBtn.disabled) {
+                detectSimilarity();
+            }
         });
     });
 
-    // Sample chips
+    // Sample chips click action
     chips.forEach(chip => {
         chip.addEventListener('click', () => {
+            if (compareBtn.disabled) return;
             name1Input.value = chip.dataset.n1;
             name2Input.value = chip.dataset.n2;
             detectSimilarity();

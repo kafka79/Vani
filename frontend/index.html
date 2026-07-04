@@ -10,6 +10,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=Outfit:wght@400;700&display=swap" rel="stylesheet">
 </head>
 <body>
+    <!-- Toast Notification Container -->
+    <div id="toast-container" class="toast-container"></div>
+
     <div class="background-blobs">
         <div class="blob blob-1"></div>
         <div class="blob blob-2"></div>
@@ -26,17 +29,18 @@
             <div class="input-group">
                 <div class="input-field">
                     <label for="name1">First Name / Place</label>
-                    <input type="text" id="name1" placeholder="e.g. Sanjay" autocomplete="off">
+                    <input type="text" id="name1" placeholder="e.g. Sanjay" autocomplete="off" required>
                 </div>
                 <div class="input-field">
                     <label for="name2">Second Name / Place</label>
-                    <input type="text" id="name2" placeholder="e.g. Sunjay" autocomplete="off">
+                    <input type="text" id="name2" placeholder="e.g. Sunjay" autocomplete="off" required>
                 </div>
             </div>
             
             <button id="compare-btn" class="btn-primary">
-                Detect Similarity
-                <span class="btn-icon">→</span>
+                <span id="btn-text">Detect Similarity</span>
+                <span id="btn-spinner" class="spinner hidden"></span>
+                <span id="btn-arrow" class="btn-icon">→</span>
             </button>
         </section>
 
@@ -70,10 +74,10 @@
         <section class="samples">
             <h3>Try these examples:</h3>
             <div class="sample-chips">
-                <button class="chip" data-n1="Varanasi" data-n2="Benares">Varanasi vs Benares</button>
-                <button class="chip" data-n1="Amit" data-n2="Ameet">Amit vs Ameet</button>
-                <button class="chip" data-n1="Kolkata" data-n2="Calcutta">Kolkata vs Calcutta</button>
-                <button class="chip" data-n1="Thiruvananthapuram" data-n2="Trivandrum">Trivandrum variants</button>
+                <button class="chip" data-n1="Varanasi" data-n2="Benares" aria-label="Compare Varanasi vs Benares">Varanasi vs Benares</button>
+                <button class="chip" data-n1="Amit" data-n2="Ameet" aria-label="Compare Amit vs Ameet">Amit vs Ameet</button>
+                <button class="chip" data-n1="Kolkata" data-n2="Calcutta" aria-label="Compare Kolkata vs Calcutta">Kolkata vs Calcutta</button>
+                <button class="chip" data-n1="Thiruvananthapuram" data-n2="Trivandrum" aria-label="Compare Thiruvananthapuram vs Trivandrum">Trivandrum variants</button>
             </div>
         </section>
     </main>
