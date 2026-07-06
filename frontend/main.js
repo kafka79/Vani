@@ -19,6 +19,10 @@ document.addEventListener('DOMContentLoaded', () => {
         ? ''
         : 'http://localhost:8000';
 
+    // Remove error highlights on user input
+    name1Input.addEventListener('input', () => name1Input.classList.remove('error'));
+    name2Input.addEventListener('input', () => name2Input.classList.remove('error'));
+
     // Toast Notification helper
     function showToast(message, type = 'error') {
         const toast = document.createElement('div');
@@ -53,7 +57,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const name1 = name1Input.value.trim();
         const name2 = name2Input.value.trim();
 
-        if (!name1 || !name2) {
+        // Reset error styling
+        name1Input.classList.remove('error');
+        name2Input.classList.remove('error');
+
+        let hasError = false;
+        if (!name1) {
+            name1Input.classList.add('error');
+            hasError = true;
+        }
+        if (!name2) {
+            name2Input.classList.add('error');
+            hasError = true;
+        }
+
+        if (hasError) {
             showToast('Please fill in both name/place fields.');
             return;
         }
@@ -65,13 +83,21 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch(`${API_URL}/compare`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name1, name2 })
+                body: JSON.stringify({ name1, name2, enable_aliases: true })
             });
 
             const data = await response.json();
 
             if (!response.ok) {
                 // Backend validation errors (HTTP 400)
+                if (data.detail && data.detail.includes('First')) {
+                    name1Input.classList.add('error');
+                } else if (data.detail && data.detail.includes('Second')) {
+                    name2Input.classList.add('error');
+                } else {
+                    name1Input.classList.add('error');
+                    name2Input.classList.add('error');
+                }
                 throw new Error(data.detail || 'An error occurred during evaluation.');
             }
 
@@ -108,6 +134,16 @@ document.addEventListener('DOMContentLoaded', () => {
         const targetScore = data.score;
         const duration = 800; // ms
         const startTime = performance.now();
+
+        // Update stroke color immediately or gradually
+        let strokeColor = '#ef4444';
+        if (targetScore >= 90) {
+            strokeColor = '#10b981'; // Green
+        } else if (targetScore >= 75) {
+            strokeColor = '#f59e0b'; // Amber
+        }
+
+        scorePath.style.stroke = strokeColor;
 
         function animate(currentTime) {
             const elapsed = currentTime - startTime;

@@ -1,6 +1,8 @@
 import asyncio
 import os
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +19,9 @@ app = FastAPI(
     title="Indic Phonetic Similarity API",
     description="Production-grade phonetic similarity engine for Indic names and entities."
 )
+
+# Dedicated thread pool executor for CPU-bound computations to prevent event loop and default pool starvation
+executor = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4))
 
 # CORS configuration
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
@@ -38,6 +43,7 @@ app.add_middleware(
 class ComparisonRequest(BaseModel):
     name1: str = Field(..., min_length=1, max_length=100, description="First name or place entity")
     name2: str = Field(..., min_length=1, max_length=100, description="Second name or place entity")
+    enable_aliases: bool = Field(True, description="Enable administrative/historical alias synonym matching")
 
 class BatchRequest(BaseModel):
     pairs: List[ComparisonRequest] = Field(..., max_items=1000, description="List of comparison pairs")
@@ -66,9 +72,20 @@ async def compare_names(request: ComparisonRequest):
     validate_input(request.name1, "First Name / Place")
     validate_input(request.name2, "Second Name / Place")
     
+    start_time = time.perf_counter()
     try:
-        # 2. Concurrency offloading: run CPU-bound phonetic comparison in separate threads
-        result = await asyncio.to_thread(engine.compare, request.name1, request.name2)
+        # 2. Concurrency offloading: run CPU-bound phonetic comparison in dedicated ThreadPoolExecutor
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            executor,
+            engine.compare,
+            request.name1,
+            request.name2,
+            request.enable_aliases
+        )
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        result["processing_time_ms"] = round(duration_ms, 3)
+        logger.info(f"Comparison of '{request.name1}' and '{request.name2}' completed in {duration_ms:.2f}ms")
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -86,14 +103,28 @@ async def compare_batch(request: BatchRequest):
         validate_input(pair.name1, f"Pair {i+1} Name 1")
         validate_input(pair.name2, f"Pair {i+1} Name 2")
 
-    # Run comparisons concurrently in threadpool
+    start_time = time.perf_counter()
+    loop = asyncio.get_running_loop()
+    
+    # Run comparisons concurrently in bounded threadpool
     tasks = [
-        asyncio.to_thread(engine.compare, pair.name1, pair.name2)
+        loop.run_in_executor(
+            executor,
+            engine.compare,
+            pair.name1,
+            pair.name2,
+            pair.enable_aliases
+        )
         for pair in request.pairs
     ]
     try:
         results = await asyncio.gather(*tasks)
-        return results
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logger.info(f"Batch of {len(request.pairs)} comparisons completed in {duration_ms:.2f}ms")
+        return {
+            "results": results,
+            "processing_time_ms": round(duration_ms, 3)
+        }
     except Exception as e:
         logger.error(f"Error during batch comparison: {str(e)}")
         raise HTTPException(status_code=500, detail="Batch execution failed")

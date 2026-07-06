@@ -159,6 +159,16 @@ header p {
     box-shadow: 0 0 0 4px var(--primary-glow);
 }
 
+.input-field input.error {
+    border-color: #ef4444;
+    box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.2);
+}
+
+.input-field input.error:focus {
+    border-color: #ef4444;
+    box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.4);
+}
+
 .btn-primary {
     width: 100%;
     background: linear-gradient(135deg, var(--primary), #4f46e5);
