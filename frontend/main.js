@@ -1,6 +1,8 @@
 document.addEventListener('DOMContentLoaded', () => {
     const name1Input = document.getElementById('name1');
     const name2Input = document.getElementById('name2');
+    const name1Error = document.getElementById('name1-error');
+    const name2Error = document.getElementById('name2-error');
     const compareBtn = document.getElementById('compare-btn');
     const btnText = document.getElementById('btn-text');
     const btnSpinner = document.getElementById('btn-spinner');
@@ -14,14 +16,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const chips = document.querySelectorAll('.chip');
     const toastContainer = document.getElementById('toast-container');
 
-    // Dynamic API base URL: use relative paths if served on port 8000 or production, else default to localhost:8000
-    const API_URL = (window.location.port === '8000' || (window.location.port === '' && window.location.hostname !== 'localhost'))
-        ? ''
-        : 'http://localhost:8000';
+    let animationFrameId = null;
 
     // Remove error highlights on user input
-    name1Input.addEventListener('input', () => name1Input.classList.remove('error'));
-    name2Input.addEventListener('input', () => name2Input.classList.remove('error'));
+    name1Input.addEventListener('input', () => {
+        name1Input.classList.remove('error');
+        name1Error.classList.add('hidden');
+    });
+    name2Input.addEventListener('input', () => {
+        name2Input.classList.remove('error');
+        name2Error.classList.add('hidden');
+    });
 
     // Toast Notification helper
     function showToast(message, type = 'error') {
@@ -60,19 +65,24 @@ document.addEventListener('DOMContentLoaded', () => {
         // Reset error styling
         name1Input.classList.remove('error');
         name2Input.classList.remove('error');
+        name1Error.classList.add('hidden');
+        name2Error.classList.add('hidden');
 
         let hasError = false;
         if (!name1) {
             name1Input.classList.add('error');
+            name1Error.textContent = 'This field is required';
+            name1Error.classList.remove('hidden');
             hasError = true;
         }
         if (!name2) {
             name2Input.classList.add('error');
+            name2Error.textContent = 'This field is required';
+            name2Error.classList.remove('hidden');
             hasError = true;
         }
 
         if (hasError) {
-            showToast('Please fill in both name/place fields.');
             return;
         }
 
@@ -80,7 +90,7 @@ document.addEventListener('DOMContentLoaded', () => {
         setLoading(true);
 
         try {
-            const response = await fetch(`${API_URL}/compare`, {
+            const response = await fetch('/compare', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name1, name2, enable_aliases: true })
@@ -90,15 +100,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!response.ok) {
                 // Backend validation errors (HTTP 400)
+                const errMsg = data.detail || 'An error occurred during evaluation.';
                 if (data.detail && data.detail.includes('First')) {
                     name1Input.classList.add('error');
+                    name1Error.textContent = errMsg;
+                    name1Error.classList.remove('hidden');
                 } else if (data.detail && data.detail.includes('Second')) {
                     name2Input.classList.add('error');
+                    name2Error.textContent = errMsg;
+                    name2Error.classList.remove('hidden');
                 } else {
                     name1Input.classList.add('error');
                     name2Input.classList.add('error');
+                    showToast(errMsg);
                 }
-                throw new Error(data.detail || 'An error occurred during evaluation.');
+                throw new Error(errMsg);
             }
 
             updateUI(data);
@@ -145,6 +161,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         scorePath.style.stroke = strokeColor;
 
+        if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+        }
+
         function animate(currentTime) {
             const elapsed = currentTime - startTime;
             const progress = Math.min(elapsed / duration, 1);
@@ -159,10 +179,10 @@ document.addEventListener('DOMContentLoaded', () => {
             scorePath.setAttribute('stroke-dasharray', dashArray);
 
             if (progress < 1) {
-                requestAnimationFrame(animate);
+                animationFrameId = requestAnimationFrame(animate);
             }
         }
-        requestAnimationFrame(animate);
+        animationFrameId = requestAnimationFrame(animate);
 
         // Update phonetic codes or display warning if missing
         code1.textContent = data.code1 || 'N/A';

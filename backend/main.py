@@ -2,7 +2,6 @@ import asyncio
 import os
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -20,8 +19,33 @@ app = FastAPI(
     description="Production-grade phonetic similarity engine for Indic names and entities."
 )
 
-# Dedicated thread pool executor for CPU-bound computations to prevent event loop and default pool starvation
-executor = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4))
+# Simple in-memory metrics tracker
+# ponytail: zero-dependency Prometheus metrics exporter
+metrics = {
+    "http_requests_total": 0,
+    "http_request_duration_seconds_sum": 0.0
+}
+
+@app.middleware("http")
+async def record_metrics(request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration = time.perf_counter() - start
+    metrics["http_requests_total"] += 1
+    metrics["http_request_duration_seconds_sum"] += duration
+    return response
+
+@app.get("/metrics")
+async def get_metrics():
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(
+        f'# HELP http_requests_total Total number of HTTP requests processed.\n'
+        f'# TYPE http_requests_total counter\n'
+        f'http_requests_total {metrics["http_requests_total"]}\n'
+        f'# HELP http_request_duration_seconds_sum Total duration of HTTP requests in seconds.\n'
+        f'# TYPE http_request_duration_seconds_sum counter\n'
+        f'http_request_duration_seconds_sum {round(metrics["http_request_duration_seconds_sum"], 6)}\n'
+    )
 
 # CORS configuration
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
@@ -74,10 +98,8 @@ async def compare_names(request: ComparisonRequest):
     
     start_time = time.perf_counter()
     try:
-        # 2. Concurrency offloading: run CPU-bound phonetic comparison in dedicated ThreadPoolExecutor
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            executor,
+        # 2. Concurrency: run in threadpool (using asyncio's default executor pool to prevent starvation)
+        result = await asyncio.to_thread(
             engine.compare,
             request.name1,
             request.name2,
@@ -98,36 +120,32 @@ async def compare_batch(request: BatchRequest):
     if not request.pairs:
         raise HTTPException(status_code=400, detail="Batch request must contain at least one comparison pair.")
 
-    # Validate all inputs upfront
-    for i, pair in enumerate(request.pairs):
-        validate_input(pair.name1, f"Pair {i+1} Name 1")
-        validate_input(pair.name2, f"Pair {i+1} Name 2")
-
     start_time = time.perf_counter()
-    loop = asyncio.get_running_loop()
     
-    # Run comparisons concurrently in bounded threadpool
+    # ponytail: process each pair safely so that one invalid pair doesn't fail the whole batch
+    def process_pair(pair, index):
+        try:
+            validate_input(pair.name1, f"Pair {index+1} Name 1")
+            validate_input(pair.name2, f"Pair {index+1} Name 2")
+            res = engine.compare(pair.name1, pair.name2, pair.enable_aliases)
+            return {"status": "success", "data": res}
+        except HTTPException as e:
+            return {"status": "error", "error": e.detail}
+        except Exception as e:
+            return {"status": "error", "error": f"Internal error: {str(e)}"}
+
     tasks = [
-        loop.run_in_executor(
-            executor,
-            engine.compare,
-            pair.name1,
-            pair.name2,
-            pair.enable_aliases
-        )
-        for pair in request.pairs
+        asyncio.to_thread(process_pair, pair, i)
+        for i, pair in enumerate(request.pairs)
     ]
-    try:
-        results = await asyncio.gather(*tasks)
-        duration_ms = (time.perf_counter() - start_time) * 1000
-        logger.info(f"Batch of {len(request.pairs)} comparisons completed in {duration_ms:.2f}ms")
-        return {
-            "results": results,
-            "processing_time_ms": round(duration_ms, 3)
-        }
-    except Exception as e:
-        logger.error(f"Error during batch comparison: {str(e)}")
-        raise HTTPException(status_code=500, detail="Batch execution failed")
+    results = await asyncio.gather(*tasks)
+    
+    duration_ms = (time.perf_counter() - start_time) * 1000
+    logger.info(f"Batch of {len(request.pairs)} comparisons completed in {duration_ms:.2f}ms")
+    return {
+        "results": results,
+        "processing_time_ms": round(duration_ms, 3)
+    }
 
 # Mount frontend static directory
 try:

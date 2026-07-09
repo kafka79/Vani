@@ -1,0 +1,20 @@
+{
+    "varanasi": ["benares", "banaras", "kashi"],
+    "benares": ["varanasi", "banaras", "kashi"],
+    "banaras": ["varanasi", "benares", "kashi"],
+    "kashi": ["varanasi", "benares", "banaras"],
+    "kolkata": ["calcutta"],
+    "calcutta": ["kolkata"],
+    "mumbai": ["bombay"],
+    "bombay": ["mumbai"],
+    "chennai": ["madras"],
+    "madras": ["chennai"],
+    "trivandrum": ["thiruvananthapuram"],
+    "thiruvananthapuram": ["trivandrum"],
+    "bengaluru": ["bangalore"],
+    "bangalore": ["bengaluru"],
+    "kochi": ["cochin"],
+    "cochin": ["kochi"],
+    "puducherry": ["pondicherry"],
+    "pondicherry": ["puducherry"]
+}

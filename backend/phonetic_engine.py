@@ -8,7 +8,7 @@ class IndicPhoneticEngine:
         # Maps similar sounding letters to common representative characters
         # Differentiates front vowels (E, I, Y) and back vowels (O, U) to avoid Amit vs Umit collision
         self.phonetic_map = {
-            'A': 'A', 'E': 'I', 'I': 'I', 'O': 'U', 'U': 'U', 'Y': 'I',
+            'A': 'A', 'E': 'E', 'I': 'I', 'O': 'O', 'U': 'U', 'Y': 'I',
             'B': 'B', 'V': 'B', 'W': 'B',  # V, W, B are phonetically interchanged in many Indic dialects
             'P': 'P', 'F': 'P',            # P and F map to plosive representative
             'C': 'K', 'G': 'K', 'K': 'K', 'Q': 'K',
@@ -17,47 +17,63 @@ class IndicPhoneticEngine:
             'M': 'M', 'N': 'M',
             'R': 'R',
             'S': 'S', 'Z': 'S', 'X': 'S',
-            'J': 'J', 'H': '',             # H represents aspiration and is skipped in base mappings, handled in rules
+            'J': 'J', 'H': 'H',             # ponytail: Map H to H to preserve standalone/aspirated sounds
         }
         
         # Indic spelling substitution rules applied before mapping
+        # ponytail: Precompiled regex patterns avoid compile-on-the-fly execution overhead
         self.indic_rules = [
-            (r'CH|KSH|SH|S', 'S'),
-            (r'PH|F', 'P'),
-            (r'BH|B', 'B'),
-            (r'DH|D|TH|T', 'T'),
-            (r'GH|G|KH|K', 'K'),
-            (r'JH|J', 'J'),
-            (r'EE', 'I'),
-            (r'OO', 'U'),
+            (re.compile(r'CH|KSH|SH|S'), 'S'),
+            (re.compile(r'PH|F'), 'P'),
+            (re.compile(r'BH'), 'BH'),
+            (re.compile(r'B'), 'B'),
+            (re.compile(r'DH|TH'), 'TH'),
+            (re.compile(r'D|T'), 'T'),
+            (re.compile(r'GH|KH'), 'KH'),
+            (re.compile(r'G|K'), 'K'),
+            (re.compile(r'JH'), 'JH'),
+            (re.compile(r'J'), 'J'),
+            (re.compile(r'EE'), 'I'),
+            (re.compile(r'OO'), 'U'),
         ]
 
-        # Alias/Synonym lookup for historical/administrative names
-        self.aliases = {
-            "varanasi": {"benares", "banaras", "kashi"},
-            "benares": {"varanasi", "banaras", "kashi"},
-            "banaras": {"varanasi", "benares", "kashi"},
-            "kashi": {"varanasi", "benares", "banaras"},
-            "kolkata": {"calcutta"},
-            "calcutta": {"kolkata"},
-            "mumbai": {"bombay"},
-            "bombay": {"mumbai"},
-            "chennai": {"madras"},
-            "madras": {"chennai"},
-            "trivandrum": {"thiruvananthapuram"},
-            "thiruvananthapuram": {"trivandrum"},
-            "bengaluru": {"bangalore"},
-            "bangalore": {"bengaluru"},
-            "kochi": {"cochin"},
-            "cochin": {"kochi"},
-            "puducherry": {"pondicherry"},
-            "pondicherry": {"puducherry"}
-        }
+        # Alias/Synonym lookup loaded from external file
+        # ponytail: load aliases from json config to decouple data from code
+        try:
+            import json
+            import os
+            aliases_path = os.path.join(os.path.dirname(__file__), "aliases.json")
+            with open(aliases_path, "r", encoding="utf-8") as f:
+                self.aliases = {k: set(v) for k, v in json.load(f).items()}
+        except Exception:
+            self.aliases = {}
+
+    def transliterate_indic(self, text):
+        """Convert Indic/Brahmi scripts to Latin phonetic characters using unicode names."""
+        # ponytail: first-principles transliteration using standard library unicode names
+        result = []
+        for char in text:
+            try:
+                name = unicodedata.name(char)
+                if any(script in name for script in ["DEVANAGARI", "BENGALI", "GURMUKHI", "GUJARATI", "ORIYA", "TAMIL", "TELUGU", "KANNADA", "MALAYALAM"]):
+                    parts = name.split()
+                    if len(parts) >= 3:
+                        sound = parts[-1].lower()
+                        if sound.endswith('a') and len(sound) > 1 and parts[-2] == "LETTER":
+                            sound = sound[:-1]
+                        result.append(sound)
+                else:
+                    result.append(char)
+            except ValueError:
+                result.append(char)
+        return "".join(result)
 
     def normalize(self, text):
         """Clean string: strip diacritics, convert to uppercase, replacing other characters with spaces."""
         if not text:
             return ""
+        # Transliterate native Indic characters before normalization
+        text = self.transliterate_indic(text)
         # Remove leading/trailing space and convert to uppercase
         text = text.strip().upper()
         # Strip diacritics/accents
@@ -83,7 +99,7 @@ class IndicPhoneticEngine:
             # Apply substitution rules per word
             processed = word
             for pattern, replacement in self.indic_rules:
-                processed = re.sub(pattern, replacement, processed)
+                processed = pattern.sub(replacement, processed)
 
             if not processed:
                 continue
@@ -139,25 +155,11 @@ class IndicPhoneticEngine:
         fuzzy_score = fuzz.token_sort_ratio(clean1, clean2)
         
         # 4. Hybrid Scoring Logic
+        # ponytail: simple linear boost/penalty. Machine learning weights if data-driven calibration is needed.
         if code1 and code2 and code1 == code2:
-            # Phonetic codes match. Apply a boost based on name length.
-            # Shorter names have higher likelihood of collision, so we check a threshold.
-            min_length = min(len(clean1), len(clean2))
-            
-            if min_length <= 3:
-                # Require higher baseline similarity to boost short names (avoids Sun vs Sam)
-                if fuzzy_score >= 40:
-                    final_score = min(100, fuzzy_score + 15)
-                    final_score = max(final_score, 75)
-                else:
-                    final_score = fuzzy_score + 10 # Little boost, no auto-match
-            else:
-                # Longer names with phonetic matches are highly likely to be variants
-                final_score = min(100, fuzzy_score + 25)
-                if fuzzy_score >= 35:
-                    final_score = max(final_score, 78)
+            final_score = min(100.0, fuzzy_score + (25.0 if min(len(clean1), len(clean2)) > 3 else 15.0))
+            final_score = max(final_score, 75.0 if min(len(clean1), len(clean2)) > 3 else 40.0)
         else:
-            # Phonetic mismatch. Apply a penalty to the fuzzy score.
             final_score = fuzzy_score * 0.70
             
         final_score = round(final_score, 2)

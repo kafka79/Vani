@@ -64,3 +64,12 @@ def test_special_characters_handling(engine):
     code_special = engine.get_phonetic_code("Sanjay-Kumar!!!")
     code_clean = engine.get_phonetic_code("Sanjay Kumar")
     assert code_special == code_clean
+
+def test_transliterate_indic(engine):
+    # Test Devanagari script transliteration
+    assert engine.transliterate_indic("अमित") == "amit"
+    assert engine.transliterate_indic("अमीत") == "amiit"
+    
+    # Test normalization and similarity of native script vs transliterated script
+    result = engine.compare("अमित", "Ameet")
+    assert result["is_similar"] is True
