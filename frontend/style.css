@@ -3,11 +3,29 @@
     --primary-glow: rgba(99, 102, 241, 0.4);
     --secondary: #ec4899;
     --accent: #10b981;
+    
+    /* Dark Theme Colors (Default) */
     --bg-dark: #0f172a;
     --card-bg: rgba(30, 41, 59, 0.7);
     --text-main: #f8fafc;
     --text-muted: #94a3b8;
     --glass-border: rgba(255, 255, 255, 0.1);
+    --input-bg: rgba(15, 23, 42, 0.5);
+    
+    /* Semantic Score Colors */
+    --color-high: #10b981;
+    --color-med: #f59e0b;
+    --color-low: #ef4444;
+}
+
+body.light-theme {
+    /* Light Theme Colors */
+    --bg-dark: #f8fafc;
+    --card-bg: rgba(255, 255, 255, 0.8);
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+    --glass-border: rgba(0, 0, 0, 0.08);
+    --input-bg: rgba(241, 245, 249, 0.9);
 }
 
 * {
@@ -25,6 +43,7 @@ body {
     display: flex;
     justify-content: center;
     padding: 2rem 1rem;
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 /* Background Blobs */
@@ -76,6 +95,32 @@ body {
     to { transform: translate(50px, 100px); }
 }
 
+/* Theme Toggle Button */
+.btn-theme-toggle {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: var(--card-bg);
+    border: 1px solid var(--glass-border);
+    color: var(--text-main);
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    font-size: 1.2rem;
+    cursor: pointer;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    backdrop-filter: blur(10px);
+    transition: all 0.3s ease;
+    z-index: 100;
+}
+
+.btn-theme-toggle:hover {
+    transform: scale(1.1);
+}
+
 /* Container */
 .container {
     max-width: 600px;
@@ -121,13 +166,14 @@ header p {
     border-radius: 24px;
     padding: 2rem;
     box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+    transition: background-color 0.3s ease, border-color 0.3s ease;
 }
 
 .input-group {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 1.5rem;
-    margin-bottom: 2rem;
+    margin-bottom: 1.5rem;
 }
 
 @media (max-width: 480px) {
@@ -144,11 +190,11 @@ header p {
 
 .input-field input {
     width: 100%;
-    background: rgba(15, 23, 42, 0.5);
+    background: var(--input-bg);
     border: 1px solid var(--glass-border);
     border-radius: 12px;
     padding: 0.8rem 1rem;
-    color: white;
+    color: var(--text-main);
     font-size: 1rem;
     transition: all 0.3s ease;
 }
@@ -175,6 +221,76 @@ header p {
     margin-top: 0.35rem;
     font-weight: 500;
     text-align: left;
+}
+
+/* Advanced Settings Accordion */
+.advanced-settings-accordion {
+    margin-bottom: 1.5rem;
+    text-align: left;
+}
+
+.advanced-settings-accordion summary {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.2s;
+    outline: none;
+}
+
+.advanced-settings-accordion summary:hover {
+    color: var(--primary);
+}
+
+.advanced-settings-content {
+    margin-top: 0.75rem;
+    padding: 1.2rem;
+    background: var(--input-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 1.2rem;
+}
+
+.settings-control {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.settings-control label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    display: flex;
+    justify-content: space-between;
+}
+
+.settings-control input[type="range"] {
+    width: 100%;
+    accent-color: var(--primary);
+    cursor: pointer;
+    background: transparent;
+}
+
+.checkbox-control {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.checkbox-control label {
+    margin-bottom: 0;
+    cursor: pointer;
+}
+
+.checkbox-control input[type="checkbox"] {
+    width: 1.1rem;
+    height: 1.1rem;
+    accent-color: var(--primary);
+    cursor: pointer;
 }
 
 .btn-primary {
@@ -245,7 +361,7 @@ header p {
     fill: none;
     stroke-width: 2.8;
     stroke-linecap: round;
-    transition: stroke-dasharray 1s ease-in-out;
+    transition: stroke-dasharray 1s ease-in-out, stroke 0.3s ease;
     stroke: var(--accent);
 }
 
@@ -261,7 +377,7 @@ header p {
     display: block;
     font-size: 1.8rem;
     font-weight: 800;
-    color: white;
+    color: var(--text-main);
 }
 
 .score-text small {
@@ -275,9 +391,40 @@ header p {
     border-radius: 99px;
     font-weight: 700;
     font-size: 0.9rem;
-    background: rgba(16, 185, 129, 0.2);
-    color: var(--accent);
-    border: 1px solid rgba(16, 185, 129, 0.3);
+    border: 1px solid var(--glass-border);
+    transition: all 0.3s ease;
+}
+
+/* Semantic Match States (CSS Custom Styles instead of Inline JS Override) */
+.status-high {
+    background: rgba(16, 185, 129, 0.15) !important;
+    color: var(--color-high) !important;
+    border-color: rgba(16, 185, 129, 0.3) !important;
+}
+
+.status-med {
+    background: rgba(245, 158, 11, 0.15) !important;
+    color: var(--color-med) !important;
+    border-color: rgba(245, 158, 11, 0.3) !important;
+}
+
+.status-low {
+    background: rgba(239, 68, 68, 0.15) !important;
+    color: var(--color-low) !important;
+    border-color: rgba(239, 68, 68, 0.3) !important;
+}
+
+/* Match stroke coloring classes */
+.circle.stroke-high {
+    stroke: var(--color-high) !important;
+}
+
+.circle.stroke-med {
+    stroke: var(--color-med) !important;
+}
+
+.circle.stroke-low {
+    stroke: var(--color-low) !important;
 }
 
 .details-grid {
@@ -336,7 +483,7 @@ header p {
 
 .chip:hover {
     background: rgba(255, 255, 255, 0.1);
-    color: white;
+    color: var(--text-main);
 }
 
 .hidden { display: none; }
@@ -426,4 +573,3 @@ input:disabled {
     transform: none !important;
     box-shadow: none !important;
 }
-

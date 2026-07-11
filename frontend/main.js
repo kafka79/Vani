@@ -15,8 +15,39 @@ document.addEventListener('DOMContentLoaded', () => {
     const similarityStatus = document.getElementById('similarity-status');
     const chips = document.querySelectorAll('.chip');
     const toastContainer = document.getElementById('toast-container');
+    
+    // Theme toggle & Advanced Options
+    const themeToggle = document.getElementById('theme-toggle');
+    const thresholdSlider = document.getElementById('threshold-slider');
+    const thresholdVal = document.getElementById('threshold-val');
+    const aliasesCheckbox = document.getElementById('aliases-checkbox');
 
     let animationFrameId = null;
+
+    // --- Light/Dark Theme Management ---
+    const savedTheme = localStorage.getItem('theme') || 'dark';
+    if (savedTheme === 'light') {
+        document.body.classList.add('light-theme');
+        themeToggle.textContent = '☀️';
+    } else {
+        themeToggle.textContent = '🌙';
+    }
+
+    themeToggle.addEventListener('click', () => {
+        const isLight = document.body.classList.toggle('light-theme');
+        if (isLight) {
+            themeToggle.textContent = '☀️';
+            localStorage.setItem('theme', 'light');
+        } else {
+            themeToggle.textContent = '🌙';
+            localStorage.setItem('theme', 'dark');
+        }
+    });
+
+    // --- Dynamic Slider Text ---
+    thresholdSlider.addEventListener('input', (e) => {
+        thresholdVal.textContent = `${e.target.value}%`;
+    });
 
     // Remove error highlights on user input
     name1Input.addEventListener('input', () => {
@@ -61,6 +92,8 @@ document.addEventListener('DOMContentLoaded', () => {
     async function detectSimilarity() {
         const name1 = name1Input.value.trim();
         const name2 = name2Input.value.trim();
+        const customThreshold = parseFloat(thresholdSlider.value);
+        const enableAliases = aliasesCheckbox.checked;
 
         // Reset error styling
         name1Input.classList.remove('error');
@@ -93,13 +126,17 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch('/compare', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name1, name2, enable_aliases: true })
+                body: JSON.stringify({ 
+                    name1, 
+                    name2, 
+                    enable_aliases: enableAliases, 
+                    threshold: customThreshold 
+                })
             });
 
             const data = await response.json();
 
             if (!response.ok) {
-                // Backend validation errors (HTTP 400)
                 const errMsg = data.detail || 'An error occurred during evaluation.';
                 if (data.detail && data.detail.includes('First')) {
                     name1Input.classList.add('error');
@@ -117,10 +154,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error(errMsg);
             }
 
-            updateUI(data);
+            updateUI(data, customThreshold);
         } catch (error) {
             console.error('API Error:', error);
-            showToast(error.message || 'Could not connect to the backend. Make sure the FastAPI server is running.');
+            showToast(error.message || 'Could not connect to the backend.');
         } finally {
             setLoading(false);
         }
@@ -142,24 +179,22 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function updateUI(data) {
+    function updateUI(data, customThreshold) {
         resultSection.classList.remove('hidden');
         
-        // Reset and animate score
-        let currentScore = 0;
         const targetScore = data.score;
         const duration = 800; // ms
         const startTime = performance.now();
 
-        // Update stroke color immediately or gradually
-        let strokeColor = '#ef4444';
+        // 1. Reset semantic match classes on circular path using design system rules
+        scorePath.classList.remove('stroke-high', 'stroke-med', 'stroke-low');
         if (targetScore >= 90) {
-            strokeColor = '#10b981'; // Green
-        } else if (targetScore >= 75) {
-            strokeColor = '#f59e0b'; // Amber
+            scorePath.classList.add('stroke-high');
+        } else if (targetScore >= customThreshold) {
+            scorePath.classList.add('stroke-med');
+        } else {
+            scorePath.classList.add('stroke-low');
         }
-
-        scorePath.style.stroke = strokeColor;
 
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
@@ -168,13 +203,10 @@ document.addEventListener('DOMContentLoaded', () => {
         function animate(currentTime) {
             const elapsed = currentTime - startTime;
             const progress = Math.min(elapsed / duration, 1);
-            
-            // Easing function (easeOutQuad)
-            const easeProgress = progress * (2 - progress);
-            currentScore = Math.floor(easeProgress * targetScore);
+            const easeProgress = progress * (2 - progress); // easeOutQuad
+            const currentScore = Math.floor(easeProgress * targetScore);
             scoreValue.textContent = currentScore;
             
-            // Update circular progress SVG
             const dashArray = `${currentScore}, 100`;
             scorePath.setAttribute('stroke-dasharray', dashArray);
 
@@ -184,32 +216,25 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         animationFrameId = requestAnimationFrame(animate);
 
-        // Update phonetic codes or display warning if missing
         code1.textContent = data.code1 || 'N/A';
         code2.textContent = data.code2 || 'N/A';
 
-        // Update status badge design based on match type and score
+        // 2. Reset semantic badge styles using CSS Classes
+        similarityStatus.classList.remove('status-high', 'status-med', 'status-low');
         if (data.score >= 90) {
             similarityStatus.textContent = data.match_type === 'alias' ? 'Verified Alias' : 'Highly Similar';
-            similarityStatus.style.background = 'rgba(16, 185, 129, 0.15)';
-            similarityStatus.style.color = '#10b981';
-            similarityStatus.style.borderColor = 'rgba(16, 185, 129, 0.3)';
-        } else if (data.score >= 75) {
+            similarityStatus.classList.add('status-high');
+        } else if (data.score >= customThreshold) {
             similarityStatus.textContent = 'Likely Match';
-            similarityStatus.style.background = 'rgba(245, 158, 11, 0.15)';
-            similarityStatus.style.color = '#f59e0b';
-            similarityStatus.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+            similarityStatus.classList.add('status-med');
         } else {
             similarityStatus.textContent = 'Distinct Entities';
-            similarityStatus.style.background = 'rgba(239, 68, 68, 0.15)';
-            similarityStatus.style.color = '#ef4444';
-            similarityStatus.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+            similarityStatus.classList.add('status-low');
         }
     }
 
     compareBtn.addEventListener('click', detectSimilarity);
 
-    // Enter key submit triggers
     [name1Input, name2Input].forEach(input => {
         input.addEventListener('keypress', (e) => {
             if (e.key === 'Enter' && !compareBtn.disabled) {
@@ -218,7 +243,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // Sample chips click action
     chips.forEach(chip => {
         chip.addEventListener('click', () => {
             if (compareBtn.disabled) return;
