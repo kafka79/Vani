@@ -36,14 +36,6 @@ async def safe_publish_update():
     except Exception as e:
         logger.warning(f"Failed to publish config update to Redis: {e}")
 
-@router.post("/reload-aliases")
-async def reload_aliases(api_key: str = Depends(verify_admin_key)):
-    """Triggers hot-reloading of the aliases JSON configuration."""
-    success = engine.reload_aliases()
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to reload aliases config.")
-    await safe_publish_update()
-    return {"status": "success", "message": "Aliases configuration reloaded successfully."}
 
 @router.post("/aliases")
 async def add_alias_group(group: List[str], api_key: str = Depends(verify_admin_key)):
@@ -56,20 +48,11 @@ async def add_alias_group(group: List[str], api_key: str = Depends(verify_admin_
     if len(normalized_group) < 2:
         raise HTTPException(status_code=400, detail="Must have at least 2 unique valid normalized names.")
         
-    # Merge into the engine's current alias mapping
-    full_group = set(normalized_group)
-    
-    with engine._alias_lock:
-        for term in normalized_group:
-            if term in engine.aliases:
-                full_group.update(engine.aliases[term])
-                
-        # Re-map every member of this merged group to group - {member}
+    # Write into Redis Sets directly
+    async with redis_client.pipeline(transaction=True) as pipe:
         for member in full_group:
-            engine.aliases[member] = list(full_group - {member})
-            
-        await redis_client.set("aliases", json.dumps(engine.aliases))
-        await safe_publish_update()
+            pipe.sadd(f"alias:{member}", *list(full_group - {member}))
+        await pipe.execute()
         
     return {"status": "success", "message": f"Added/merged alias group: {list(full_group)}"}
 

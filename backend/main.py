@@ -3,9 +3,10 @@ from contextlib import asynccontextmanager
 import logging
 import os
 import time
+from collections import defaultdict
 import threading
 from collections import defaultdict
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -98,10 +99,10 @@ class TokenBucketLimiter:
         self.limit = limit
         self.window = window
         self.buckets = {}  # ip -> (tokens, last_update)
-        self.lock = threading.Lock()
+        self.locks = defaultdict(threading.Lock)
 
     def is_allowed(self, ip: str) -> bool:
-        with self.lock:
+        with self.locks[ip]:
             now = time.time()
             if ip not in self.buckets:
                 self.buckets[ip] = (self.limit - 1, now)
@@ -132,7 +133,7 @@ class RedisRateLimiter:
         
         if not self.breaker.is_allowed():
             RATE_LIMITER_BYPASSED_TOTAL.inc()
-            return self.fallback_limiter.is_allowed(client_ip)
+            return False # Fail closed securely
             
         try:
             async with redis_client.pipeline(transaction=True) as pipe:
@@ -150,7 +151,7 @@ class RedisRateLimiter:
             self.breaker.record_failure()
             REDIS_CONNECTION_ERRORS_TOTAL.inc()
             RATE_LIMITER_BYPASSED_TOTAL.inc()
-            return self.fallback_limiter.is_allowed(client_ip)
+            return False # Fail closed securely
 
 # Limit to 100 requests per 60 seconds per IP
 rate_limiter = RedisRateLimiter(limit=100, window=60)
@@ -175,25 +176,18 @@ async def lifespan(app: FastAPI):
         from prometheus_client import multiprocess
         multiprocess.MultiProcessCollector(metrics_registry)
         
-    # Start ProcessPoolExecutor with cgroups-aware limits
-    max_workers_env = os.environ.get("MAX_WORKERS")
-    if max_workers_env:
-        max_workers = int(max_workers_env)
-    else:
+    # Fetch config asynchronously
+    async def fetch_and_apply_config():
         try:
-            with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as f:
-                quota = int(f.read().strip())
-            with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
-                period = int(f.read().strip())
-            if quota > 0 and period > 0:
-                max_workers = max(1, int(quota / period))
-            else:
-                max_workers = os.cpu_count()
-        except Exception:
-            max_workers = os.cpu_count()
-            
-    logger.info(f"Starting ProcessPoolExecutor with {max_workers} workers.")
-    app.state.executor = ProcessPoolExecutor(max_workers=max_workers)
+            weights_data = await redis_client.get("weights")
+            if weights_data:
+                weights = json.loads(weights_data)
+                engine.update_weights(weights)
+                logger.info("Successfully fetched weights from Redis on startup.")
+        except Exception as e:
+            logger.warning(f"Could not connect to Redis on startup. Using default config. Error: {e}")
+
+    await fetch_and_apply_config()
     
     # Start background Pub/Sub listener for config updates
     async def listen_config_updates():
@@ -203,8 +197,7 @@ async def lifespan(app: FastAPI):
             async for message in pubsub.listen():
                 if message["type"] == "message":
                     logger.info("Redis Pub/Sub signal received. Reloading configuration...")
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, engine.sync_config, True)
+                    await fetch_and_apply_config()
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -223,7 +216,6 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
         
-    app.state.executor.shutdown(wait=True)
     logger.info("Shutting down Indic Phonetic Similarity Service...")
     if multiproc_dir and os.path.exists(multiproc_dir):
         import shutil
@@ -240,8 +232,6 @@ app = FastAPI(
 
 # Include Admin Router
 app.include_router(admin_router)
-
-# --- Prometheus Metrics Registration (Placeholder, defined above) ---
 
 # --- Middleware ---
 @app.middleware("http")
@@ -297,15 +287,17 @@ app.add_middleware(
 
 # --- Models ---
 class ComparisonRequest(BaseModel):
-    name1: str = Field(..., min_length=1, max_length=100, description="First name or place entity")
-    name2: str = Field(..., min_length=1, max_length=100, description="Second name or place entity")
-    enable_aliases: bool = Field(True, description="Enable administrative/historical alias synonym matching")
-    threshold: float = Field(default=None, description="Optional custom similarity threshold override")
+    name1: str = Field(..., description="First name/word to compare")
+    name2: str = Field(..., description="Second name/word to compare")
+    enable_aliases: bool = Field(default=True, description="Whether to check synonym aliases")
+    threshold: float = Field(default=None, description="Optional override for matching threshold", ge=0.0, le=100.0)
+    locale: Optional[str] = Field(default=None, description="Optional locale for phonetic mapping (e.g., 'bn', 'hi', 'ta')")
 
 class BatchRequest(BaseModel):
-    pairs: List[ComparisonRequest] = Field(..., max_items=1000, description="List of comparison pairs")
+    pairs: List[ComparisonRequest] = Field(..., max_length=100, description="List of comparison pairs")
     enable_aliases: bool = Field(True, description="Enable administrative/historical alias synonym matching globally")
-    threshold: float = Field(default=None, description="Optional custom similarity threshold override globally")
+    threshold: float = Field(default=None, ge=0.0, le=100.0, description="Optional custom similarity threshold override globally")
+    locale: Optional[str] = Field(default=None, description="Optional locale for phonetic mapping (e.g., 'bn', 'hi', 'ta')")
 
 def validate_input(name: str, identifier: str):
     """Performs validation checks on input names with sanitized error messages to prevent injection reflection."""
@@ -341,30 +333,30 @@ async def get_metrics():
 
 @app.post("/compare", dependencies=[Depends(rate_limit_dependency)])
 async def compare_names(request_data: ComparisonRequest, request: Request):
-    validate_input(request_data.name1, "First Name / Place")
-    validate_input(request_data.name2, "Second Name / Place")
+    validate_input(request_data.name1, "Name 1")
+    validate_input(request_data.name2, "Name 2")
     
+    is_alias_match = False
+    if request_data.enable_aliases:
+        norm1 = engine.normalize(request_data.name1, locale=request_data.locale).lower()
+        norm2 = engine.normalize(request_data.name2, locale=request_data.locale).lower()
+        try:
+            if await redis_client.sismember(f"alias:{norm1}", norm2):
+                is_alias_match = True
+        except Exception as e:
+            logger.warning(f"Failed to check Redis aliases: {e}")
+
     start_time = time.perf_counter()
     try:
-        loop = asyncio.get_running_loop()
-        executor = getattr(request.app.state, "executor", None)
-        if executor:
-            result = await loop.run_in_executor(
-                executor,
-                engine.compare,
-                request_data.name1,
-                request_data.name2,
-                request_data.enable_aliases,
-                request_data.threshold
-            )
-        else:
-            result = await run_in_threadpool(
-                engine.compare,
-                request_data.name1,
-                request_data.name2,
-                request_data.enable_aliases,
-                request_data.threshold
-            )
+        result = await run_in_threadpool(
+            engine.compare,
+            request_data.name1,
+            request_data.name2,
+            request_data.enable_aliases,
+            request_data.threshold,
+            is_alias_match,
+            request_data.locale
+        )
         duration_ms = (time.perf_counter() - start_time) * 1000
         result["processing_time_ms"] = round(duration_ms, 3)
         return result
@@ -374,82 +366,74 @@ async def compare_names(request_data: ComparisonRequest, request: Request):
         logger.error(f"Error during comparison: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error during processing")
 
-async def process_pair(pair: ComparisonRequest, global_enable_aliases: bool, global_threshold: float, index: int, executor):
+async def process_pair(pair: ComparisonRequest, global_enable_aliases: bool, global_threshold: float, global_locale: str, index: int):
     """Worker helper to validate and run comparisons in a threadpool concurrently."""
     try:
-        # Validate input values (sanitized)
         validate_input(pair.name1, f"Pair {index+1} Name 1")
         validate_input(pair.name2, f"Pair {index+1} Name 2")
         
-        # Determine threshold & alias enablement preference
         aliases_flag = pair.enable_aliases if pair.enable_aliases is not None else global_enable_aliases
         threshold_val = pair.threshold if pair.threshold is not None else global_threshold
+        locale_val = pair.locale if pair.locale is not None else global_locale
         
-        loop = asyncio.get_running_loop()
-        if executor:
-            res = await loop.run_in_executor(
-                executor,
-                engine.compare,
-                pair.name1,
-                pair.name2,
-                aliases_flag,
-                threshold_val
-            )
-        else:
-            res = await run_in_threadpool(
-                engine.compare,
-                pair.name1,
-                pair.name2,
-                aliases_flag,
-                threshold_val
-            )
+        is_alias_match = False
+        if aliases_flag:
+            norm1 = engine.normalize(pair.name1, locale=locale_val).lower()
+            norm2 = engine.normalize(pair.name2, locale=locale_val).lower()
+            try:
+                if await redis_client.sismember(f"alias:{norm1}", norm2):
+                    is_alias_match = True
+            except Exception as e:
+                logger.warning(f"Failed to check Redis aliases: {e}")
+
+        res = await run_in_threadpool(
+            engine.compare,
+            pair.name1,
+            pair.name2,
+            aliases_flag,
+            threshold_val,
+            is_alias_match,
+            locale_val
+        )
         return {"status": "success", "data": res}
     except HTTPException as e:
         return {"status": "error", "error": e.detail}
     except Exception as e:
         return {"status": "error", "error": "Internal error during batch processing"}
 
-from fastapi import Response
-
 @app.post("/compare-batch", dependencies=[Depends(rate_limit_dependency)])
-async def compare_batch(batch_request: BatchRequest, request: Request, response: Response):
+async def compare_batch(batch_request: BatchRequest, request: Request):
     if not batch_request.pairs:
         raise HTTPException(status_code=400, detail="Batch request must contain at least one comparison pair.")
 
     # Enforce payload limit
-    if len(batch_request.pairs) > 1000:
-        raise HTTPException(status_code=400, detail="Batch request size cannot exceed 1000 pairs.")
+    if len(batch_request.pairs) > 100:
+        raise HTTPException(status_code=400, detail="Batch request size cannot exceed 100 pairs.")
 
     start_time = time.perf_counter()
     
     # Process tasks in chunks of 50 to yield control to the event loop
     results = []
     chunk_size = 50
-    executor = getattr(request.app.state, "executor", None)
     
     for i in range(0, len(batch_request.pairs), chunk_size):
         chunk = batch_request.pairs[i : i + chunk_size]
         chunk_tasks = [
-            process_pair(pair, batch_request.enable_aliases, batch_request.threshold, i + j, executor)
+            process_pair(pair, batch_request.enable_aliases, batch_request.threshold, batch_request.locale, i + j)
             for j, pair in enumerate(chunk)
         ]
         chunk_results = await asyncio.gather(*chunk_tasks)
+        await asyncio.sleep(0)  # Yield to the event loop
         results.extend(chunk_results)
     
-    # Check for mixed errors and return 207 Multi-Status
-    has_success = any(r["status"] == "success" for r in results)
-    has_error = any(r["status"] == "error" for r in results)
+    errors = [r for r in results if r["status"] == "error"]
+    successes = [r for r in results if r["status"] == "success"]
     
-    if has_error:
-        if not has_success:
-            response.status_code = 400
-        else:
-            response.status_code = 207  # Mixed success/failure
-            
     duration_ms = (time.perf_counter() - start_time) * 1000
     logger.info(f"Batch of {len(batch_request.pairs)} comparisons completed in {duration_ms:.2f}ms")
     return {
-        "results": results,
+        "results": successes,
+        "errors": errors,
         "processing_time_ms": round(duration_ms, 3)
     }
 

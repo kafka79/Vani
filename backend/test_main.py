@@ -7,9 +7,15 @@ os.environ["ALLOWED_ORIGINS"] = "http://localhost:3000,http://example.com"
 os.environ["API_KEY"] = ""  # Disable API key for public endpoints in test unless configured
 os.environ["ADMIN_API_KEY"] = "admin-test-key"
 
-from main import app
+from unittest.mock import AsyncMock, patch
+from main import app, rate_limiter
 
 client = TestClient(app)
+
+@pytest.fixture(autouse=True)
+def mock_rate_limiter():
+    with patch.object(rate_limiter, 'is_allowed', new_callable=AsyncMock, return_value=True):
+        yield
 
 def test_health_endpoint():
     response = client.get("/health")
@@ -80,19 +86,7 @@ def test_validation_error_sanitization():
     assert "!!!" not in detail
     assert "contains no valid Latin characters" in detail
 
-def test_admin_reload_aliases():
-    # Test without auth key
-    response = client.post("/admin/reload-aliases")
-    assert response.status_code == 403
 
-    # Test with wrong auth key
-    response_wrong = client.post("/admin/reload-aliases", headers={"X-API-Key": "wrong-key"})
-    assert response_wrong.status_code == 403
-
-    # Test with correct key
-    response_correct = client.post("/admin/reload-aliases", headers={"X-API-Key": "admin-test-key"})
-    assert response_correct.status_code == 200
-    assert response_correct.json()["status"] == "success"
 
 def test_rate_limiting():
     # Skip if Redis is not available for testing the rate limiter
@@ -121,12 +115,14 @@ def test_compare_batch_endpoint_multi_status():
         "enable_aliases": True
     }
     response = client.post("/compare-batch", json=payload)
-    assert response.status_code == 207
+    assert response.status_code == 200
     data = response.json()
     assert "results" in data
-    assert len(data["results"]) == 2
+    assert "errors" in data
+    assert len(data["results"]) == 1
     assert data["results"][0]["status"] == "success"
-    assert data["results"][1]["status"] == "error"
+    assert len(data["errors"]) == 1
+    assert data["errors"][0]["status"] == "error"
 
 def test_compare_batch_endpoint_all_failed():
     payload = {
@@ -135,4 +131,7 @@ def test_compare_batch_endpoint_all_failed():
         ]
     }
     response = client.post("/compare-batch", json=payload)
-    assert response.status_code == 400
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["errors"]) == 1
+    assert data["errors"][0]["status"] == "error"

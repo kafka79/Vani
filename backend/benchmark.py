@@ -51,9 +51,28 @@ def run_benchmarks():
     print(f"{'Name 1':<20} | {'Name 2':<20} | {'True':<5} | {'Pred':<5} | {'Score':<6} | {'Time (ms)':<9} | {'Status'}")
     print("-" * 90)
     
+    # Load local aliases to calculate is_alias_match for benchmark comparison (mimicking Redis)
+    import json
+    import os
+    aliases_map = {}
+    aliases_path = os.path.join(os.path.dirname(__file__), "aliases.json")
+    try:
+        with open(aliases_path, "r", encoding="utf-8") as f:
+            aliases_map = json.load(f)
+    except Exception:
+        pass
+
     for name1, name2, expected, desc in BENCHMARK_DATA:
         start_time = time.perf_counter()
-        res = engine.compare(name1, name2, enable_aliases=True)
+        
+        # Calculate is_alias_match
+        is_alias_match = False
+        norm1 = engine.normalize(name1).lower()
+        norm2 = engine.normalize(name2).lower()
+        if norm1 in aliases_map and norm2 in aliases_map[norm1]:
+            is_alias_match = True
+            
+        res = engine.compare(name1, name2, enable_aliases=True, is_alias_match=is_alias_match)
         duration_ms = (time.perf_counter() - start_time) * 1000
         latencies.append(duration_ms)
         
@@ -104,5 +123,69 @@ def run_benchmarks():
     print(f"Latency (p95)        : {p95_latency:.3f} ms")
     print("=" * 60)
 
+def optimize_weights():
+    print("=" * 60)
+    print(" Running Empirical Weight Optimization...")
+    print("=" * 60)
+    
+    thresholds = [70.0, 75.0, 80.0, 85.0, 90.0]
+    fuzzy_weights = [0.3, 0.4, 0.5, 0.6, 0.7]
+    boost_short_words = [5.0, 10.0, 15.0]
+    
+    best_f1 = -1
+    best_params = {}
+    
+    total_combinations = len(thresholds) * len(fuzzy_weights) * len(boost_short_words)
+    print(f"Total Combinations to search: {total_combinations}\n")
+    
+    for t in thresholds:
+        for fw in fuzzy_weights:
+            for bsw in boost_short_words:
+                engine.update_weights({
+                    "DEFAULT_THRESHOLD": t,
+                    "FUZZY_WEIGHT": fw,
+                    "BOOST_SHORT_WORD": bsw
+                })
+                
+                tp, fp, tn, fn = 0, 0, 0, 0
+                for name1, name2, expected, desc in BENCHMARK_DATA:
+                    is_alias_match = False
+                    norm1 = engine.normalize(name1).lower()
+                    norm2 = engine.normalize(name2).lower()
+                    if norm1 in aliases_map and norm2 in aliases_map[norm1]:
+                        is_alias_match = True
+                        
+                    res = engine.compare(name1, name2, enable_aliases=True, is_alias_match=is_alias_match)
+                    pred = res["is_similar"]
+                    if expected and pred: tp += 1
+                    elif not expected and not pred: tn += 1
+                    elif not expected and pred: fp += 1
+                    else: fn += 1
+                
+                precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+                recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+                f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+                
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_params = {
+                        "DEFAULT_THRESHOLD": t,
+                        "FUZZY_WEIGHT": fw,
+                        "BOOST_SHORT_WORD": bsw
+                    }
+                    
+    print("Optimization Complete.")
+    print(f"Best F1 Score: {best_f1:.2%}")
+    print(f"Best Parameters: {best_params}")
+    
+    # Apply best parameters
+    engine.update_weights(best_params)
+    print("\nBest parameters have been applied to the current engine instance.")
+    print("To persist these, update the engine defaults or use the /admin/weights API.")
+
 if __name__ == "__main__":
-    run_benchmarks()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--optimize":
+        optimize_weights()
+    else:
+        run_benchmarks()
