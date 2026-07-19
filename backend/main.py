@@ -11,15 +11,14 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import PlainTextResponse
-from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel, Field
 import uvicorn
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST, CollectorRegistry, multiprocess
 from concurrent.futures import ProcessPoolExecutor
 import redis.asyncio as redis
 
-from phonetic_engine import engine
+from phonetic_engine import engine, compare_with_weights
 from admin import router as admin_router
 
 # Setup logging
@@ -57,15 +56,41 @@ RATE_LIMITER_BYPASSED_TOTAL = Counter(
     registry=metrics_registry
 )
 
-# --- Rate Limiting Infrastructure ---
-class DummyRequests:
-    def clear(self):
+def init_worker():
+    """Initializer for process pool workers to subscribe to dynamic configuration updates."""
+    import threading
+    import redis
+    import json
+    from phonetic_engine import engine
+    
+    def config_listener():
         try:
-            import redis
-            r = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
-            r.flushdb()
-        except:
+            r = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+            pubsub = r.pubsub()
+            pubsub.subscribe("config_updates")
+            for message in pubsub.listen():
+                if message["type"] == "message":
+                    w_data = r.get("weights")
+                    if w_data:
+                        engine.update_weights(json.loads(w_data))
+        except Exception:
             pass
+
+    # Fetch initial state
+    try:
+        r = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+        initial_weights = r.get("weights")
+        if initial_weights:
+            engine.update_weights(json.loads(initial_weights))
+    except Exception:
+        pass
+        
+    t = threading.Thread(target=config_listener, daemon=True)
+    t.start()
+
+# Global Process Pool with configurable limits
+worker_count = int(os.getenv("WORKER_COUNT", max(1, (os.cpu_count() or 2) // 2)))
+process_pool = ProcessPoolExecutor(max_workers=worker_count, initializer=init_worker)
 
 class AsyncRedisCircuitBreaker:
     def __init__(self, failure_threshold=3, recovery_time=60):
@@ -94,46 +119,20 @@ class AsyncRedisCircuitBreaker:
             return False
         return True
 
-class TokenBucketLimiter:
-    def __init__(self, limit: int, window: int):
-        self.limit = limit
-        self.window = window
-        self.buckets = {}  # ip -> (tokens, last_update)
-        self.lock = threading.Lock()
-
-    def is_allowed(self, ip: str) -> bool:
-        with self.lock:
-            now = time.time()
-            if ip not in self.buckets:
-                self.buckets[ip] = (self.limit - 1, now)
-                return True
-            tokens, last_update = self.buckets[ip]
-            elapsed = now - last_update
-            new_tokens = tokens + elapsed * (self.limit / self.window)
-            if new_tokens > self.limit:
-                new_tokens = self.limit
-            if new_tokens >= 1:
-                self.buckets[ip] = (new_tokens - 1, now)
-                return True
-            self.buckets[ip] = (new_tokens, now)
-            return False
-
 class RedisRateLimiter:
-    """Lightweight Redis-based sliding window rate limiter with local fallback & circuit breaker."""
+    """Lightweight Redis-based sliding window rate limiter with fail-open circuit breaker."""
     def __init__(self, limit: int, window: int):
         self.limit = limit
         self.window = window
-        self.requests = DummyRequests()
         self.breaker = AsyncRedisCircuitBreaker()
-        self.fallback_limiter = TokenBucketLimiter(limit, window)
 
-    async def is_allowed(self, client_ip: str) -> bool:
+    async def is_allowed(self, client_ip: str, fail_open: bool = True) -> bool:
         now = time.time()
         key = f"rate_limit:{client_ip}"
         
         if not self.breaker.is_allowed():
             RATE_LIMITER_BYPASSED_TOTAL.inc()
-            return self.fallback_limiter.is_allowed(client_ip)
+            return fail_open
             
         try:
             async with redis_client.pipeline(transaction=True) as pipe:
@@ -151,18 +150,19 @@ class RedisRateLimiter:
             self.breaker.record_failure()
             REDIS_CONNECTION_ERRORS_TOTAL.inc()
             RATE_LIMITER_BYPASSED_TOTAL.inc()
-            return self.fallback_limiter.is_allowed(client_ip)
+            return fail_open
 
 # Limit to 100 requests per 60 seconds per IP
 rate_limiter = RedisRateLimiter(limit=100, window=60)
 
-async def rate_limit_dependency(request: Request):
-    ip = request.client.host if request.client else "127.0.0.1"
-    if not await rate_limiter.is_allowed(ip):
-        raise HTTPException(
-            status_code=429,
-            detail="Too many requests. Please slow down and try again later."
-        )
+def rate_limit_dependency(fail_open: bool = True):
+    async def dependency(request: Request):
+        ip = request.client.host if request.client else "127.0.0.1"
+        if not await rate_limiter.is_allowed(ip, fail_open=fail_open):
+            status = 429 if rate_limiter.breaker.is_allowed() else 503
+            detail = "Too many requests. Please slow down and try again later." if status == 429 else "Service temporarily unavailable due to high load."
+            raise HTTPException(status_code=status, detail=detail)
+    return dependency
 
 # --- Lifespan Context Manager ---
 @asynccontextmanager
@@ -217,6 +217,7 @@ async def lifespan(app: FastAPI):
         pass
         
     logger.info("Shutting down Indic Phonetic Similarity Service...")
+    process_pool.shutdown(wait=True)
     if multiproc_dir and os.path.exists(multiproc_dir):
         import shutil
         try:
@@ -303,20 +304,14 @@ class BatchRequest(BaseModel):
     locale: Optional[str] = Field(default=None, description="Optional locale for phonetic mapping (e.g., 'bn', 'hi', 'ta')")
 
 def validate_input(name: str, identifier: str):
-    """Performs validation checks on input names with sanitized error messages to prevent injection reflection."""
+    """Performs validation checks on input names with sanitized error messages."""
     trimmed = name.strip()
     if not trimmed:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Input for {identifier} must contain non-whitespace characters."
-        )
+        raise ValueError(f"Input for {identifier} must contain non-whitespace characters.")
     
     normalized = engine.normalize(trimmed)
     if not normalized:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Input for {identifier} contains no valid Latin characters. Please use English transliterations."
-        )
+        raise ValueError(f"Input for {identifier} contains no valid Latin characters. Please use English transliterations.")
 
 # --- Public Endpoints ---
 @app.get("/health")
@@ -334,10 +329,13 @@ async def get_metrics():
         data = generate_latest(metrics_registry)
     return PlainTextResponse(data, media_type=CONTENT_TYPE_LATEST)
 
-@app.post("/compare", dependencies=[Depends(rate_limit_dependency)])
+@app.post("/compare", dependencies=[Depends(rate_limit_dependency(fail_open=True))])
 async def compare_names(request_data: ComparisonRequest, request: Request):
-    validate_input(request_data.name1, "Name 1")
-    validate_input(request_data.name2, "Name 2")
+    try:
+        validate_input(request_data.name1, "Name 1")
+        validate_input(request_data.name2, "Name 2")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     
     is_alias_match = False
     if request_data.enable_aliases:
@@ -350,8 +348,11 @@ async def compare_names(request_data: ComparisonRequest, request: Request):
             logger.warning(f"Failed to check Redis aliases: {e}")
 
     start_time = time.perf_counter()
+    loop = asyncio.get_running_loop()
+
     try:
-        result = await run_in_threadpool(
+        result = await loop.run_in_executor(
+            process_pool,
             engine.compare,
             request_data.name1,
             request_data.name2,
@@ -369,104 +370,110 @@ async def compare_names(request_data: ComparisonRequest, request: Request):
         logger.error(f"Error during comparison: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error during processing")
 
-async def process_pair_cpu(pair: ComparisonRequest, aliases_flag: bool, threshold_val: float, locale_val: str, index: int, is_alias_match: bool):
-    """Worker helper to validate and run comparisons in a threadpool concurrently."""
-    try:
-        res = await run_in_threadpool(
-            engine.compare,
-            pair.name1,
-            pair.name2,
-            aliases_flag,
-            threshold_val,
-            is_alias_match,
-            locale_val
-        )
-        return {"status": "success", "data": res}
-    except HTTPException as e:
-        return {"status": "error", "error": e.detail}
-    except Exception as e:
-        return {"status": "error", "error": "Internal error during batch processing"}
+def validate_and_normalize_chunk(param_list):
+    """Worker helper to validate and normalize a chunk of strings in process pool."""
+    results = []
+    for pair, aliases_flag, locale_val in param_list:
+        try:
+            validate_input(pair.name1, "Name 1")
+            validate_input(pair.name2, "Name 2")
+            norm1 = engine.normalize(pair.name1, locale=locale_val).lower() if aliases_flag else None
+            norm2 = engine.normalize(pair.name2, locale=locale_val).lower() if aliases_flag else None
+            results.append((True, norm1, norm2, None))
+        except ValueError as e:
+            results.append((False, None, None, str(e)))
+        except Exception as e:
+            results.append((False, None, None, "Internal validation error"))
+    return results
 
-@app.post("/compare-batch", dependencies=[Depends(rate_limit_dependency)])
+def compare_chunk_worker(valid_items):
+    """Worker helper to run comparisons in process pool for a chunk."""
+    results = []
+    for pair, aliases_flag, threshold_val, locale_val, is_alias_match in valid_items:
+        try:
+            res = engine.compare(pair.name1, pair.name2, aliases_flag, threshold_val, is_alias_match, locale_val)
+            results.append({"status": "success", "data": res})
+        except ValueError as e:
+            results.append({"status": "error", "error": str(e)})
+        except Exception as e:
+            results.append({"status": "error", "error": "Internal comparison error"})
+    return results
+
+@app.post("/compare-batch", dependencies=[Depends(rate_limit_dependency(fail_open=False))])
 async def compare_batch(batch_request: BatchRequest, request: Request):
     if not batch_request.pairs:
         raise HTTPException(status_code=400, detail="Batch request must contain at least one comparison pair.")
-
-    # Enforce payload limit
     if len(batch_request.pairs) > 100:
         raise HTTPException(status_code=400, detail="Batch request size cannot exceed 100 pairs.")
 
     start_time = time.perf_counter()
+    loop = asyncio.get_running_loop()
     
-    # Process tasks in chunks of 50 to yield control to the event loop
     results = []
-    chunk_size = 50
     
-    for i in range(0, len(batch_request.pairs), chunk_size):
-        chunk = batch_request.pairs[i : i + chunk_size]
+    # 1. Resolve parameters and offload validation/normalization to process pool chunk
+    param_list = []
+    for pair in batch_request.pairs:
+        aliases_flag = pair.enable_aliases if pair.enable_aliases is not None else batch_request.enable_aliases
+        locale_val = pair.locale if pair.locale is not None else batch_request.locale
+        param_list.append((pair, aliases_flag, locale_val))
         
-        # 1. Resolve parameters and collect validations
-        valid_chunk = []
-        alias_checks = []
+    val_results = await loop.run_in_executor(process_pool, validate_and_normalize_chunk, param_list)
+    
+    # 2. Pipelined Redis alias lookup from main thread
+    valid_items = []
+    alias_checks = []
+    
+    for idx, (is_valid, norm1, norm2, err_msg) in enumerate(val_results):
+        pair, aliases_flag, locale_val = param_list[idx]
+        threshold_val = pair.threshold if pair.threshold is not None else batch_request.threshold
+        if not is_valid:
+            results.append({"status": "error", "error": err_msg})
+        else:
+            if aliases_flag and norm1 and norm2:
+                alias_checks.append((norm1, norm2, idx))
+            valid_items.append((pair, aliases_flag, threshold_val, locale_val, idx, False))
+            
+    alias_map = {}
+    if alias_checks:
+        try:
+            async with redis_client.pipeline(transaction=False) as pipe:
+                for norm1, norm2, _ in alias_checks:
+                    pipe.sismember(f"alias:{norm1}", norm2)
+                alias_redis_results = await pipe.execute()
+                for i, (_, _, original_idx) in enumerate(alias_checks):
+                    alias_map[original_idx] = bool(alias_redis_results[i])
+        except Exception as e:
+            logger.warning(f"Batch Redis alias check failed: {e}")
+            
+    # Update is_alias_match
+    final_valid_items = []
+    for pair, aliases_flag, threshold_val, locale_val, idx, _ in valid_items:
+        is_alias_match = alias_map.get(idx, False)
+        final_valid_items.append((pair, aliases_flag, threshold_val, locale_val, is_alias_match))
         
-        for j, pair in enumerate(chunk):
-            index = i + j
-            try:
-                validate_input(pair.name1, f"Pair {index+1} Name 1")
-                validate_input(pair.name2, f"Pair {index+1} Name 2")
-                
-                aliases_flag = pair.enable_aliases if pair.enable_aliases is not None else batch_request.enable_aliases
-                threshold_val = pair.threshold if pair.threshold is not None else batch_request.threshold
-                locale_val = pair.locale if pair.locale is not None else batch_request.locale
-                
-                if aliases_flag:
-                    norm1 = engine.normalize(pair.name1, locale=locale_val).lower()
-                    norm2 = engine.normalize(pair.name2, locale=locale_val).lower()
-                    alias_checks.append((norm1, norm2, index, pair, aliases_flag, threshold_val, locale_val))
-                else:
-                    valid_chunk.append((pair, aliases_flag, threshold_val, locale_val, index, False))
-            except HTTPException as e:
-                results.append({"status": "error", "error": e.detail})
-            except Exception:
-                results.append({"status": "error", "error": "Internal error during validation"})
-
-        # 2. Pipelined Redis alias lookup
-        alias_results = []
-        if alias_checks:
-            try:
-                async with redis_client.pipeline(transaction=False) as pipe:
-                    for norm1, norm2, _, _, _, _, _ in alias_checks:
-                        pipe.sismember(f"alias:{norm1}", norm2)
-                    alias_results = await pipe.execute()
-            except Exception as e:
-                logger.warning(f"Batch Redis alias check failed: {e}")
-                alias_results = [False] * len(alias_checks)
-                
-            for idx, (norm1, norm2, index, pair, aliases_flag, threshold_val, locale_val) in enumerate(alias_checks):
-                is_alias_match = bool(alias_results[idx])
-                valid_chunk.append((pair, aliases_flag, threshold_val, locale_val, index, is_alias_match))
-                
-        # 3. CPU bound processing
-        chunk_tasks = [
-            process_pair_cpu(pair, aliases_flag, threshold_val, locale_val, index, is_alias_match)
-            for pair, aliases_flag, threshold_val, locale_val, index, is_alias_match in valid_chunk
-        ]
-        
-        if chunk_tasks:
-            chunk_results = await asyncio.gather(*chunk_tasks)
-            results.extend(chunk_results)
-            await asyncio.sleep(0)  # Yield to the event loop
+    # 3. CPU bound processing via Process Pool chunk
+    if final_valid_items:
+        compare_results = await loop.run_in_executor(process_pool, compare_chunk_worker, final_valid_items)
+        results.extend(compare_results)
     
     errors = [r for r in results if r["status"] == "error"]
     successes = [r for r in results if r["status"] == "success"]
     
     duration_ms = (time.perf_counter() - start_time) * 1000
     logger.info(f"Batch of {len(batch_request.pairs)} comparisons completed in {duration_ms:.2f}ms")
-    return {
+    
+    status_code = 200
+    if errors and successes:
+        status_code = 207
+    elif errors and not successes:
+        status_code = 400
+        
+    return JSONResponse(status_code=status_code, content={
         "results": successes,
         "errors": errors,
         "processing_time_ms": round(duration_ms, 3)
-    }
+    })
 
 # Mount static frontend
 try:

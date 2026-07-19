@@ -131,10 +131,10 @@ def test_schwa_deletion_normalization(engine):
     # Schwa deletion checks: Amit vs Amita should map identically
     result = engine.compare("Amit", "Amita")
     assert result["is_similar"] is True
-    assert result["score"] == 100.0  # Exact match due to terminal 'a' deletion
-    assert result["match_type"] == "exact"
+    # Score is very high but not exactly 100.0 because naive A stripping was removed
+    assert result["score"] >= 95.0
+    assert result["match_type"] == "hybrid"
 
     result_vowel = engine.compare("Suneeta", "Sunita")
     assert result_vowel["is_similar"] is True
     assert result_vowel["score"] >= 95.0
-

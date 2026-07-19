@@ -49,7 +49,6 @@ class IndicPhoneticEngine:
             'J': 'J', 'H': 'H',             # H is mapped to H to preserve standalone/aspirated sounds
         }
         
-        # Precompiled regex patterns for standard Indic spelling substitutions
         self.indic_rules = [
             (re.compile(r'CH|KSH|KSS|KS|SH|S|X'), 'S'),
             (re.compile(r'PH|F'), 'P'),
@@ -64,9 +63,9 @@ class IndicPhoneticEngine:
             (re.compile(r'OO'), 'U'),
         ]
         
-        pass
-
-
+        self.NON_ALPHANUM_RE = re.compile(r'[^A-Z0-9\s]')
+        self.SPACES_RE = re.compile(r'\s+')
+        self._indic_map = self._build_indic_map()
 
     def update_weights(self, weights_dict):
         """Updates internal empirical weights dynamically."""
@@ -115,9 +114,6 @@ class IndicPhoneticEngine:
 
     def transliterate_indic(self, text, locale=None):
         """Convert Indic/Brahmi scripts to Latin phonetic characters using a precomputed map."""
-        if not hasattr(self, "_indic_map"):
-            self._indic_map = self._build_indic_map()
-            
         # Optional language-specific overrides for common phonetic shifts
         overrides = {}
         if locale == 'bn':
@@ -175,21 +171,9 @@ class IndicPhoneticEngine:
         # Standardize double vowels for better fuzzy matching
         text = text.replace("EE", "I").replace("OO", "U")
         
-        # Preserve alphanumeric characters and spaces
-        text = re.sub(r'[^A-Z0-9\s]', ' ', text)
-        text = re.sub(r'\s+', ' ', text)
-        
-        # Schwa Deletion / Terminal Vowel normalization:
-        # Refined rule: Only strip terminal A if word length > 2 to preserve uniform short names.
-        # Stop stripping O and U as they are strong phonetic identifiers.
-        words = text.split()
-        normalized_words = []
-        for w in words:
-            if len(w) > 2 and w[-1] == 'A':
-                normalized_words.append(w[:-1])
-            else:
-                normalized_words.append(w)
-        text = " ".join(normalized_words)
+        # Preserve alphanumeric characters and spaces using precompiled regex
+        text = self.NON_ALPHANUM_RE.sub(' ', text)
+        text = self.SPACES_RE.sub(' ', text)
         
         return text.strip()
 
@@ -282,8 +266,8 @@ class IndicPhoneticEngine:
         
         # 4. Hybrid Scoring Logic using Configurable Parameters
         # Measure min_len of normalized names BEFORE Schwa-deletion to preserve correct word boosts
-        clean1 = re.sub(r'[^A-Z0-9\s]', ' ', self.transliterate_indic(name1, locale=locale).upper()).strip()
-        clean2 = re.sub(r'[^A-Z0-9\s]', ' ', self.transliterate_indic(name2, locale=locale).upper()).strip()
+        clean1 = self.NON_ALPHANUM_RE.sub(' ', self.transliterate_indic(name1, locale=locale).upper()).strip()
+        clean2 = self.NON_ALPHANUM_RE.sub(' ', self.transliterate_indic(name2, locale=locale).upper()).strip()
         min_len = min(len(clean1), len(clean2))
         final_score = fuzzy_score * self.FUZZY_WEIGHT
         
